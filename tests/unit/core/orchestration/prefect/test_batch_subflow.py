@@ -341,3 +341,80 @@ class TestBatchSubflowIntegration:
                             op_flow=[],
                             global_config={"job_id": "job-1"},
                         )
+
+
+class TestBatchSubflowCustomOperators:
+    """Verify worker orchestrator reconstruction preserves enable_custom_operators."""
+
+    @staticmethod
+    def _run_subflow_capturing_orchestrator(*, extra_kwargs: dict | None = None):
+        from docpipe.core.orchestration.prefect.batch_subflow import batch_subflow
+        from docpipe.core.orchestration.prefect.prefect_engine import PrefectEngine
+        from docpipe.core.orchestration.python.python_orchestrator import PythonOrchestrator
+
+        batch_transfer = {
+            "type": "inline",
+            "data": {"columns": ["id", "content"], "data": [{"id": 1, "content": "hello"}]},
+        }
+        created: list[PythonOrchestrator] = []
+        original_init = PythonOrchestrator.__init__
+
+        def _capture_init(self, **kwargs):
+            original_init(self, **kwargs)
+            created.append(self)
+
+        mock_factory = MagicMock()
+        mock_factory.create_job_stats_service.return_value = MagicMock()
+        mock_factory.create_job_run_manager.return_value = MagicMock()
+
+        call_kwargs = {
+            "job_run_id": "jr-worker-1",
+            "batch_id": "b-worker-1",
+            "batch_num": 0,
+            "batch_transfer": batch_transfer,
+            "op_flow": [],
+            "global_config": {"job_id": "job-1"},
+        }
+        if extra_kwargs:
+            call_kwargs.update(extra_kwargs)
+
+        with (
+            patch(
+                "docpipe.core.orchestration.prefect.batch_subflow.get_default_factory",
+                return_value=mock_factory,
+            ),
+            patch(
+                "docpipe.core.orchestration.prefect.batch_subflow.set_session_info",
+            ),
+            patch.object(PythonOrchestrator, "__init__", _capture_init),
+            patch.object(PrefectEngine, "execute_operator_flow"),
+        ):
+            batch_subflow(**call_kwargs)
+
+        assert len(created) == 1
+        return created[0]
+
+    def test_explicit_opt_in_preserved_when_worker_env_unset(self, monkeypatch):
+        monkeypatch.delenv("DOCPIPE_ENABLE_CUSTOM_OPERATORS", raising=False)
+        orchestrator = self._run_subflow_capturing_orchestrator(extra_kwargs={"enable_custom_operators": True})
+        assert orchestrator.enable_custom_operators is True
+
+    def test_explicit_opt_in_preserved_when_worker_env_false(self, monkeypatch):
+        monkeypatch.setenv("DOCPIPE_ENABLE_CUSTOM_OPERATORS", "false")
+        orchestrator = self._run_subflow_capturing_orchestrator(extra_kwargs={"enable_custom_operators": True})
+        assert orchestrator.enable_custom_operators is True
+
+    def test_explicit_disable_preserved_when_worker_env_true(self, monkeypatch):
+        monkeypatch.setenv("DOCPIPE_ENABLE_CUSTOM_OPERATORS", "true")
+        orchestrator = self._run_subflow_capturing_orchestrator(extra_kwargs={"enable_custom_operators": False})
+        assert orchestrator.enable_custom_operators is False
+
+    def test_omitted_flag_uses_worker_env_when_true(self, monkeypatch):
+        monkeypatch.setenv("DOCPIPE_ENABLE_CUSTOM_OPERATORS", "true")
+        orchestrator = self._run_subflow_capturing_orchestrator()
+        assert orchestrator.enable_custom_operators is True
+
+    def test_omitted_flag_defaults_to_disabled_when_worker_env_unset(self, monkeypatch):
+        monkeypatch.delenv("DOCPIPE_ENABLE_CUSTOM_OPERATORS", raising=False)
+        orchestrator = self._run_subflow_capturing_orchestrator()
+        assert orchestrator.enable_custom_operators is False

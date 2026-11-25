@@ -1501,3 +1501,110 @@ class TestExecutePipelinedBatchesAsyncNonCompletedState:
         # One failure should be recorded for batch 0
         assert len(failed_info) == 1
         assert failed_info[0]["batch_num"] == 0
+
+
+# ---------------------------------------------------------------------------
+# _submit_batch_flow_run — custom-operator flag propagation
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitBatchFlowRunCustomOperators:
+    """Verify resolved enable_custom_operators is forwarded in the submission payload."""
+
+    @staticmethod
+    async def _submit_with_orchestrator(*, orchestrator):
+        import asyncio as _asyncio
+
+        from prefect.client.schemas.objects import FlowRun
+
+        adapter = _build_adapter()
+        adapter.prefect_engine.orchestrator = orchestrator
+
+        captured: dict = {}
+        mock_flow_run = MagicMock(spec=FlowRun)
+        mock_flow_run.id = uuid4()
+
+        async def fake_run_deployment(**kwargs):
+            captured.update(kwargs)
+            return mock_flow_run
+
+        from docpipe.core.constants.constants import DocpipeConstants
+
+        with patch(
+            "docpipe.core.orchestration.prefect.adapters.work_pool_adapter.run_deployment",
+            side_effect=fake_run_deployment,
+        ):
+            await adapter._submit_batch_flow_run(
+                batch_info=_batch(0),
+                batch_transfer={"type": "inline", "data": {}},
+                op_flow=[],
+                global_config={},
+                job_run_id="jr-custom-ops",
+                submission_semaphore=_asyncio.Semaphore(1),
+                submitted_runs=[],
+                docpipe_constants=DocpipeConstants,
+            )
+
+        return captured["parameters"]
+
+    @pytest.mark.asyncio
+    async def test_forwards_explicit_opt_in_when_env_unset(self, monkeypatch):
+        from docpipe.core.orchestration.python.python_orchestrator import PythonOrchestrator
+
+        monkeypatch.delenv("DOCPIPE_ENABLE_CUSTOM_OPERATORS", raising=False)
+        orchestrator = PythonOrchestrator(enable_custom_operators=True)
+
+        params = await self._submit_with_orchestrator(orchestrator=orchestrator)
+
+        assert params["enable_custom_operators"] is True
+
+    @pytest.mark.asyncio
+    async def test_forwards_explicit_opt_in_when_env_false(self, monkeypatch):
+        from docpipe.core.orchestration.python.python_orchestrator import PythonOrchestrator
+
+        monkeypatch.setenv("DOCPIPE_ENABLE_CUSTOM_OPERATORS", "false")
+        orchestrator = PythonOrchestrator(enable_custom_operators=True)
+
+        params = await self._submit_with_orchestrator(orchestrator=orchestrator)
+
+        assert params["enable_custom_operators"] is True
+
+    @pytest.mark.asyncio
+    async def test_forwards_explicit_disable_when_env_true(self, monkeypatch):
+        from docpipe.core.orchestration.python.python_orchestrator import PythonOrchestrator
+
+        monkeypatch.setenv("DOCPIPE_ENABLE_CUSTOM_OPERATORS", "true")
+        orchestrator = PythonOrchestrator(enable_custom_operators=False)
+
+        params = await self._submit_with_orchestrator(orchestrator=orchestrator)
+
+        assert params["enable_custom_operators"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("env_value", "expected"),
+        [
+            (None, False),
+            ("true", True),
+        ],
+    )
+    async def test_forwards_env_resolved_setting_when_arg_omitted(self, monkeypatch, env_value, expected):
+        from docpipe.core.orchestration.python.python_orchestrator import PythonOrchestrator
+
+        if env_value is None:
+            monkeypatch.delenv("DOCPIPE_ENABLE_CUSTOM_OPERATORS", raising=False)
+        else:
+            monkeypatch.setenv("DOCPIPE_ENABLE_CUSTOM_OPERATORS", env_value)
+        orchestrator = PythonOrchestrator()
+
+        params = await self._submit_with_orchestrator(orchestrator=orchestrator)
+
+        assert params["enable_custom_operators"] is expected
+
+    @pytest.mark.asyncio
+    async def test_omits_flag_when_orchestrator_flag_is_not_bool(self):
+        adapter = _build_adapter()
+        # Default _mock_engine().orchestrator is a Mock, not a bool-valued attribute.
+        params = await self._submit_with_orchestrator(orchestrator=adapter.prefect_engine.orchestrator)
+
+        assert "enable_custom_operators" not in params

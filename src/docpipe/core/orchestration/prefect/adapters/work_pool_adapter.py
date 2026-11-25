@@ -432,17 +432,23 @@ class WorkPoolAdapter(BatchExecutionPort):
         flow_name = flow_def.get(docpipe_constants.FLOW_NAME) or flow_def.get(docpipe_constants.NAME, "docpipe_flow")
         run_name = f"{flow_name}_batch_{batch_info.batch_num}"
 
+        parameters: dict[str, Any] = {
+            "batch_id": batch_info.batch_id,
+            "batch_num": batch_info.batch_num,
+            "batch_transfer": batch_transfer,
+            "op_flow": op_flow,
+            "global_config": global_config,
+            "job_run_id": job_run_id,
+        }
+        orchestrator = getattr(self.prefect_engine, "orchestrator", None)
+        enable_custom_operators = getattr(orchestrator, "enable_custom_operators", None)
+        if isinstance(enable_custom_operators, bool):
+            parameters[docpipe_constants.ENABLE_CUSTOM_OPERATORS] = enable_custom_operators
+
         async with submission_semaphore:
             flow_run_result = await run_deployment(  # type: ignore[misc]
                 name=deployment_full_name,
-                parameters={
-                    "batch_id": batch_info.batch_id,
-                    "batch_num": batch_info.batch_num,
-                    "batch_transfer": batch_transfer,
-                    "op_flow": op_flow,
-                    "global_config": global_config,
-                    "job_run_id": job_run_id,
-                },
+                parameters=parameters,
                 flow_run_name=run_name,
                 timeout=0,
                 as_subflow=False,
